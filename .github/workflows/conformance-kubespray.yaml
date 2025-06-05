@@ -20,7 +20,7 @@ on:
   push:
     branches:
       - 'main'
-      - 'test_spray_ci'
+      - 'test_spray_0605'
     tags:
       - v[0-9]+.[0-9]+.[0-9]+
       - v[0-9]+.[0-9]+.[0-9]+-*
@@ -62,7 +62,7 @@ concurrency:
 env:
   clusterName: kubespray-ci-${{ github.run_id }}-${{ github.run_attempt }}
   FIXED_SHA: 6e5af5010ec407ac5569229810f865ccf85230e3
-  KUBESPRAY_SHA: master # v2.28.0
+  KUBESPRAY_SHA: 739e5e1c6b07a55eb1b395f62c7ff55b3d51ad3e
 
 jobs:
   echo-inputs:
@@ -167,16 +167,37 @@ jobs:
           kube_node
           EOF
 
+          cat << EOF > inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml
+          
+          unsafe_show_logs: true
+          kube_version: "1.31.6"
+          container_manager: containerd
+          k8s_image_pull_policy: IfNotPresent
+          kube_proxy_mode: iptables
+          enable_nodelocaldns: false
+          etcd_deployment_type: kubeadm
+          ntp_enabled: true
+          auto_renew_certificates: false
+          kube_cert_validity_period: 87600h
+          kube_ca_cert_validity_period: 175200h
+          EOF
+
       - name: Deploy Kubernetes cluster
         run: |
           source kubespray-venv/bin/activate
           cd kubespray/
-          ansible-playbook -i inventory/mycluster/inventory.ini cluster.yml -b -v \
-            -e '{"container_manager":"docker","docker_package_info":{"pkgs":[]}}' \
-            -e '{"kube_network_plugin":"cilium","kube_owner":"root"}'
+          ansible-playbook -i inventory/mycluster/inventory.ini cluster.yml -b -v
 
           mkdir -p $HOME/.kube
           sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
           sudo chown "$(id -u)":"$(id -g)" $HOME/.kube/config
 
           kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+
+          echo "Kubernetes cluster deployed successfully."
+
+          echo "Checking kubeadm-config.yaml for certificate validity periods..."
+          sudo cat /etc/kubernetes/kubeadm-config.yaml | grep ValidityPeriod
+
+          echo "Checking kubeadm-config.yaml for certificate renewal..."
+          sudo kubeadm certs check-expiration
