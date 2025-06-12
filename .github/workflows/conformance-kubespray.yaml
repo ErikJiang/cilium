@@ -138,6 +138,171 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Create Target Container Node
+        id: create-node
+        run: |
+          echo "Creating Kubernetes target container node..."
+
+          docker network create kubespray-net || true
+
+          # --tmpfs /run/lock \
+          # --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+          # kindest/base:v20250521-31a79fd4 \
+          
+          docker run -d \
+            --name kubespray-node \
+            --hostname kubespray-node \
+            --privileged \
+            --security-opt "seccomp=unconfined" \
+            --security-opt "apparmor=unconfined" \
+            --security-opt "label=disable" \
+            --ipc private \
+            --cgroupns private \
+            --shm-size 64m \
+            --network kubespray-net \
+            --tmpfs /tmp:rw,rprivate,nosuid,nodev \
+            --tmpfs /run:rw,rprivate,nosuid,nodev \
+            --volume /dev/mapper:/dev/mapper \
+            --volume /lib/modules:/lib/modules:ro \
+            --publish 6443:6443 \
+            --expose "6443/tcp" \
+            rancher/systemd-node:v0.0.5 \
+            /sbin/init
+
+          echo "Waiting for container to start..."
+          sleep 20
+
+          # docker exec kubespray-node bash -c "
+          #   echo "Starting cleanup of kindest/base for Kubespray..."
+          #   SERVICES_TO_CLEAN="kubelet.service containerd.service undo-mount-hacks.service"
+          #   for SERVICE in $SERVICES_TO_CLEAN; do
+          #     echo "Processing $SERVICE..."
+          #     systemctl stop "$SERVICE" || echo "$SERVICE not running or failed to stop."
+          #     systemctl disable "$SERVICE" || echo "Failed to disable $SERVICE."
+          #     systemctl mask "$SERVICE" || echo "Failed to mask $SERVICE."
+          #   done
+          #   echo "Moving original systemd unit files..."
+          #   SYSTEMD_UNIT_FILES=(
+          #     "/etc/systemd/system/kubelet.service"
+          #     "/etc/systemd/system/kubelet.service.d"
+          #     "/etc/systemd/system/containerd.service"
+          #     "/etc/systemd/system/multi-user.target.wants/kubelet.service"
+          #     "/etc/systemd/system/multi-user.target.wants/containerd.service"
+          #   )
+          #   for UNIT_FILE in "${SYSTEMD_UNIT_FILES[@]}"; do
+          #     if [ -e "$UNIT_FILE" ]; then
+          #       mv "$UNIT_FILE" "${UNIT_FILE}.kind_orig" || echo "Failed to move $UNIT_FILE, or already moved."
+          #     fi
+          #   done
+
+          #   rm -rf /etc/systemd/system/*kube*
+          #   rm /etc/system/*kube* -rf
+
+          #   echo "Reloading systemd daemon and resetting failed units..."
+          #   systemctl daemon-reload || echo "Failed to reload systemd daemon."
+          #   systemctl reset-failed || echo "Failed to reset failed units."
+          #   echo "Backing up existing configurations and CNI binaries..."
+          #   DIRS_TO_BACKUP=(
+          #     "/etc/kubernetes"
+          #     "/etc/containerd"
+          #     "/opt/cni/bin"
+          #   )
+          #   for DIR_PATH in "${DIRS_TO_BACKUP[@]}"; do
+          #     if [ -d "$DIR_PATH" ]; then
+          #       mv "$DIR_PATH" "${DIR_PATH}.kind_bak" || echo "Failed to move $DIR_PATH, or already moved."
+          #     fi
+          #     mkdir -p "$DIR_PATH"
+          #   done
+          #   mkdir -p /etc/kubernetes/manifests
+          #   if command -v ctr &> /dev/null; then
+          #     echo "Attempting to clean up existing containerd state..."
+          #     CONTAINERD_NS="k8s.io"
+          #     ctr -n "${CONTAINERD_NS}" tasks ls -q | xargs -r --no-run-if-empty ctr -n "${CONTAINERD_NS}" tasks kill -s 9 || true
+          #     ctr -n "${CONTAINERD_NS}" tasks ls -q | xargs -r --no-run-if-empty ctr -n "${CONTAINERD_NS}" tasks rm || true
+          #     ctr -n "${CONTAINERD_NS}" containers ls -q | xargs -r --no-run-if-empty ctr -n "${CONTAINERD_NS}" containers rm || true
+          #   else
+          #     echo "ctr command not found, skipping containerd state cleanup."
+          #   fi
+          #   mkdir -p /etc/kubernetes/pki
+          #   mkdir -p /var/lib/kubelet
+          #   echo "Cleanup complete. The kindest/base container environment is now better prepared for Kubespray."
+          # "
+
+          # echo "Installing required packages in container..."
+          # docker exec kubespray-node bash -c "
+          #   export DEBIAN_FRONTEND=noninteractive
+          #   apt-get update
+          #   apt-get install -y openssh-server dbus iputils-ping python3 python3-pip sudo curl wget
+
+          #   systemctl enable ssh
+          #   systemctl start ssh
+          #   systemctl start dbus.socket
+          #   systemctl start dbus
+
+          #   systemctl status ssh
+          #   systemctl status dbus
+
+          #   rm -f /run/nologin /etc/nologin
+
+          #   useradd -m -s /bin/bash kubespray
+          #   echo 'kubespray:kubespray123' | chpasswd
+          #   echo 'kubespray ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+          # "
+          
+          # 单独处理SSH密钥生成，并验证文件是否创建成功
+          echo "Setting up SSH keys..."
+          docker exec kubespray-node bash -c "
+            mkdir -p /home/kubespray/.ssh
+            ssh-keygen -t rsa -f /home/kubespray/.ssh/id_rsa -N ''
+            cp /home/kubespray/.ssh/id_rsa.pub /home/kubespray/.ssh/authorized_keys
+            chown -R kubespray:kubespray /home/kubespray/.ssh
+            chmod 700 /home/kubespray/.ssh
+            chmod 600 /home/kubespray/.ssh/authorized_keys
+            chmod 600 /home/kubespray/.ssh/id_rsa
+            
+            # 验证文件是否存在
+            ls -la /home/kubespray/.ssh/
+          "
+
+          # 配置SSH服务
+          docker exec kubespray-node bash -c "
+            echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+            echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
+            echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
+            systemctl restart ssh
+          "
+
+          CONTAINER_IP=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" kubespray-node)
+          echo "Container IP: $CONTAINER_IP"
+          echo "container_ip=$CONTAINER_IP" >> $GITHUB_OUTPUT
+
+          # 确认文件存在后再复制
+          echo "Verifying SSH key exists before copying..."
+          docker exec kubespray-node ls -la /home/kubespray/.ssh/id_rsa
+          
+          # 复制SSH密钥到宿主机
+          echo "Copying SSH key from container..."
+          docker cp kubespray-node:/home/kubespray/.ssh/id_rsa ./kubespray_key || {
+            echo "Failed to copy SSH key. Checking container status..."
+            docker ps -a | grep kubespray-node
+            docker logs kubespray-node
+            exit 1
+          }
+          
+          chmod 600 ./kubespray_key
+
+          echo "Waiting for system to fully start..."
+          sleep 15
+
+          echo "Testing SSH connection..."
+          ssh -i ./kubespray_key -o StrictHostKeyChecking=no kubespray@$CONTAINER_IP "echo 'SSH connection successful'" || {
+            echo "SSH connection failed. Checking SSH service status..."
+            docker exec kubespray-node systemctl status ssh
+            exit 1
+          }
+      # - name: Setup tmate session
+      #   uses: mxschmitt/action-tmate@v3
+
       - name: Checkout Kubespray
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -158,45 +323,95 @@ jobs:
         run: |
           cd kubespray/
           cp -rfp inventory/sample inventory/mycluster
+          
+          # 使用绝对路径而不是相对路径
+          SSH_KEY_PATH=$(realpath ../kubespray_key)
+          echo "SSH key absolute path: $SSH_KEY_PATH"
 
           cat > inventory/mycluster/inventory.ini << EOF
-          [all]
-          localhost ansible_connection=local
+           [all]
+          kubespray-node ansible_host=${{ steps.create-node.outputs.container_ip }} ansible_user=kubespray ansible_ssh_private_key_file=${SSH_KEY_PATH} ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 
           [kube_control_plane]
-          localhost
+          kubespray-node
 
           [etcd]
-          localhost
+          kubespray-node
 
           [kube_node]
-          localhost
+          kubespray-node
 
           [k8s_cluster:children]
           kube_control_plane
           kube_node
           EOF
 
+          echo "Inventory configuration:"
+          cat inventory/mycluster/inventory.ini
+
       - name: Deploy Kubernetes cluster
         run: |
           source kubespray-venv/bin/activate
           cd kubespray/
 
-          # ansible-playbook -i inventory/mycluster/inventory.ini contrib/os-services/os-services.yml -b -v \
-          #   -e '{"disable_service_firewall":true}'
+          echo "Testing Ansible connectivity..."
+          ls -la $(realpath ../kubespray_key)
+          chmod 600 $(realpath ../kubespray_key)
+          
+          ansible -i inventory/mycluster/inventory.ini all -m ping
 
-          ansible-playbook -i inventory/mycluster/inventory.ini cluster.yml -b -v \
-            -e '{"container_manager":"docker","docker_package_info":{"pkgs":[]}}' \
-            -e '{"kube_network_plugin":"cni","kube_owner":"root"}'
+          ansible-playbook -i inventory/mycluster/inventory.ini cluster.yml -b -vvv \
+            -e "kube_api_server_ip=${{ steps.create-node.outputs.container_ip }}" \
+            -e "supplementary_addresses_in_ssl_keys=['${{ steps.create-node.outputs.container_ip }}']" \
+            -e '{"kube_network_plugin": "cni"}' \
+            -e '{"kube_owner": "root"}' \
+            -e '{"kubelet_fail_swap_on": false}' \
+            -e '{"kubeadm_ignore_preflight_errors": ["SystemVerification"]}' \
+            -e '{"resolvconf_mode": "none"}' \
+            -e '{"enable_nodelocaldns": false}'\
+            -e '{"etcd_deployment_type": "kubeadm"}'
 
-          mkdir -p $HOME/.kube
-          sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-          sudo chown "$(id -u)":"$(id -g)" $HOME/.kube/config
+          # mkdir -p $HOME/.kube
+          # sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+          # sudo chown "$(id -u)":"$(id -g)" $HOME/.kube/config
 
-          kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+          # kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
 
       - name: Setup tmate session
+        if: ${{ always() }}
         uses: mxschmitt/action-tmate@v3
+
+      - name: Setup kubectl access
+        run: |
+          echo "Setting up kubectl access..."
+
+          docker exec kubespray-node test -f /etc/kubernetes/admin.conf
+
+          docker cp kubespray-node:/etc/kubernetes/admin.conf ./admin.conf
+          
+          mkdir -p $HOME/.kube
+          cp ./admin.conf $HOME/.kube/config
+          cat $HOME/.kube/config
+
+          sed -i "s/127.0.0.1/${{ steps.create-node.outputs.container_ip }}/g" $HOME/.kube/config
+          sed -i "s/localhost/${{ steps.create-node.outputs.container_ip }}/g" $HOME/.kube/config
+          cat $HOME/.kube/config
+          
+          echo "Kubernetes cluster info:"
+          kubectl cluster-info
+          
+          echo "Waiting for nodes to be ready..."
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+          
+          echo "Waiting for system pods to be ready..."
+          kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+          
+          echo "Current cluster status:"
+          kubectl get nodes -o wide
+          kubectl get pods --all-namespaces
+
+      # - name: Setup tmate session
+      #   uses: mxschmitt/action-tmate@v3
 
       # - name: Set up job variables
       #   id: vars
